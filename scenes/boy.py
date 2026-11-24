@@ -1,6 +1,7 @@
 
 import bpy
 import math
+from mathutils import Vector
 
 def build(bpy, fps):
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -48,7 +49,7 @@ def build(bpy, fps):
     sphere("Head", (0, 0, 2.15), (0.52, 0.46, 0.56), skin)
     sphere("Hair", (0, 0.06, 2.48), (0.54, 0.47, 0.27), black)
 
-    # Eyes
+    # Eyes and pupils
     for x in (-0.19, 0.19):
         sphere("Eye", (x, -0.415, 2.20), (0.075, 0.055, 0.10), white)
         sphere("Pupil", (x, -0.465, 2.20), (0.035, 0.025, 0.055), black)
@@ -81,7 +82,7 @@ def build(bpy, fps):
     marker("ankle.L", (-0.22, 0, 0.10))
     marker("ankle.R", (0.22, 0, 0.10))
 
-    # Gentle waving animation
+    # Waving animation
     for f in range(1, sc.frame_end + 1, 3):
         arm_r.rotation_euler[1] = -0.5 + 0.35 * math.sin(f * 0.12)
         arm_r.keyframe_insert(data_path="rotation_euler", frame=f)
@@ -104,8 +105,8 @@ def build(bpy, fps):
     cam = bpy.data.objects.new("Camera", cam_data)
     sc.collection.objects.link(cam)
     cam.location = (0, -9, 2.2)
-    target = (0, 0, 1.3)
-    direction = bpy.mathutils.Vector(target) - cam.location
+    target = Vector((0, 0, 1.3))
+    direction = target - cam.location
     cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
     cam.data.lens = 50
     sc.camera = cam
