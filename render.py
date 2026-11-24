@@ -2,6 +2,7 @@
 
 Usage:
   python render.py --start 1 --end 120 --step 2 --out frames
+Defaults: scenes/boy.py, 720x1280 (vertical Shorts), 24 fps.
 Hard-fails if any expected frame is missing after render.
 """
 import argparse
@@ -14,6 +15,8 @@ import bpy
 
 
 def load_scene_module(path):
+    if not os.path.isfile(path):
+        sys.exit(f"FATAL: scene file not found: {path}")
     spec = importlib.util.spec_from_file_location("scene_mod", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -22,27 +25,40 @@ def load_scene_module(path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--scene", default="scenes/demo.py")
+    p.add_argument("--scene", default="scenes/boy.py")
     p.add_argument("--start", type=int, required=True)
     p.add_argument("--end", type=int, required=True)
     p.add_argument("--step", type=int, default=1)
     p.add_argument("--out", required=True)
-    p.add_argument("--width", type=int, default=1280)
-    p.add_argument("--height", type=int, default=720)
+    p.add_argument("--width", type=int, default=720)
+    p.add_argument("--height", type=int, default=1280)
     p.add_argument("--samples", type=int, default=24)
     p.add_argument("--fps", type=int, default=24)
     a = p.parse_args()
 
+    if a.step < 1 or a.start < 1 or a.end < a.start:
+        sys.exit("FATAL: need start >= 1, end >= start, step >= 1")
+
     os.makedirs(a.out, exist_ok=True)
     mod = load_scene_module(a.scene)
+    if not hasattr(mod, "build"):
+        sys.exit(f"FATAL: {a.scene} has no build(bpy, fps) function")
     mod.build(bpy, a.fps)
 
     sc = bpy.context.scene
+    if a.end > sc.frame_end:
+        sys.exit(f"FATAL: --end {a.end} is beyond the scene's last frame {sc.frame_end}")
+    if sc.camera is None:
+        sys.exit("FATAL: scene has no active camera")
+
     sc.render.engine = "CYCLES"
     sc.cycles.device = "CPU"
     sc.cycles.samples = a.samples
     sc.cycles.use_denoising = True
-    sc.cycles.denoiser = "OPENIMAGEDENOISE"
+    try:
+        sc.cycles.denoiser = "OPENIMAGEDENOISE"
+    except TypeError:
+        print("WARNING: OpenImageDenoise not available, using default denoiser", flush=True)
     sc.render.resolution_x = a.width
     sc.render.resolution_y = a.height
     sc.render.resolution_percentage = 100
