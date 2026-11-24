@@ -1,4 +1,3 @@
-
 name: render
 
 on:
@@ -14,11 +13,11 @@ on:
         default: "scenes/shots/demo.json"
         type: string
       total_frames:
-        description: "Total frames at full fps"
+        description: "Total frames at full fps (boy scene has 96 = 4 s at 24 fps)"
         default: "96"
         type: string
       jobs:
-        description: "Parallel jobs"
+        description: "Parallel jobs (1-20)"
         default: "4"
         type: string
       step:
@@ -41,6 +40,13 @@ on:
         description: "Cycles samples"
         default: "24"
         type: string
+      publish_release:
+        description: "Also publish final.mp4 as a GitHub release asset"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
   plan:
@@ -50,45 +56,56 @@ jobs:
       count: ${{ steps.m.outputs.count }}
     steps:
       - id: m
-        shell: python
         env:
           N: ${{ inputs.total_frames }}
           J: ${{ inputs.jobs }}
           S: ${{ inputs.step }}
+          FPS: ${{ inputs.fps }}
+          W: ${{ inputs.width }}
+          H: ${{ inputs.height }}
+          SAMPLES: ${{ inputs.samples }}
         run: |
-          import json, math, os
+          python3 - <<'PY'
+          import json, math, os, sys
 
-          n = int(os.environ["N"])
-          j = int(os.environ["J"])
-          s = int(os.environ["S"])
+          def num(name, lo, hi):
+              raw = os.environ[name]
+              if not raw.isdigit():
+                  sys.exit(f"FATAL: input {name}={raw!r} must be a whole number")
+              v = int(raw)
+              if not lo <= v <= hi:
+                  sys.exit(f"FATAL: input {name}={v} must be between {lo} and {hi}")
+              return v
+
+          n = num("N", 1, 100000)
+          j = num("J", 1, 20)
+          s = num("S", 1, 100)
+          num("FPS", 1, 120)
+          num("W", 16, 4096)
+          num("H", 16, 4096)
+          num("SAMPLES", 1, 4096)
 
           per = math.ceil(n / j)
-          per = math.ceil(per / s) * s
+          per = math.ceil(per / s) * s      # chunk size is a multiple of step
 
           inc = []
           start = 1
           idx = 0
-
           while start <= n:
               end = min(n, start + per - 1)
-              inc.append({
-                  "idx": idx,
-                  "start": start,
-                  "end": end
-              })
+              inc.append({"idx": idx, "start": start, "end": end})
               start = end + 1
               idx += 1
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(
-                  "matrix=" +
-                  json.dumps({"include": inc}) +
-                  "\n"
-              )
+              f.write("matrix=" + json.dumps({"include": inc}) + "\n")
               f.write(f"count={len(inc)}\n")
+          print("plan:", inc)
+          PY
 
   qa:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +113,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+
+      - name: Install system libraries for bpy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libegl1 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3
 
       - name: Install requirements
         run: pip install -r requirements.txt
@@ -106,10 +128,26 @@ jobs:
       - name: Quality gate
         env:
           SHOTS: ${{ inputs.shots }}
+          SCENE: ${{ inputs.scene }}
+          FPS: ${{ inputs.fps }}
+          WIDTH: ${{ inputs.width }}
+          HEIGHT: ${{ inputs.height }}
+          TOTAL: ${{ inputs.total_frames }}
         run: |
           python qa.py \
-            --scene "${{ inputs.scene }}" \
-            --fps ${{ inputs.fps }}
+            --scene "$SCENE" \
+            --fps "$FPS" \
+            --width "$WIDTH" \
+            --height "$HEIGHT" \
+            --total-frames "$TOTAL"
+
+      - name: Upload QA report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-report
+          path: qa_report.json
+          if-no-files-found: ignore
 
   render:
     needs: [plan, qa]
@@ -118,7 +156,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 20
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
@@ -129,50 +167,72 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      - name: Install system libraries for bpy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libegl1 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3
+
       - name: Install requirements
         run: pip install -r requirements.txt
 
       - name: Render frames
         env:
           SHOTS: ${{ inputs.shots }}
-        run: >
-          python render.py
-          --scene "${{ inputs.scene }}"
-          --start ${{ matrix.start }}
-          --end ${{ matrix.end }}
-          --step ${{ inputs.step }}
-          --out frames
-          --width ${{ inputs.width }}
-          --height ${{ inputs.height }}
-          --samples ${{ inputs.samples }}
-          --fps ${{ inputs.fps }}
-
-      - name: Install ffmpeg
+          SCENE: ${{ inputs.scene }}
+          STEP: ${{ inputs.step }}
+          WIDTH: ${{ inputs.width }}
+          HEIGHT: ${{ inputs.height }}
+          SAMPLES: ${{ inputs.samples }}
+          FPS: ${{ inputs.fps }}
+          START: ${{ matrix.start }}
+          END: ${{ matrix.end }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          python render.py \
+            --scene "$SCENE" \
+            --start "$START" \
+            --end "$END" \
+            --step "$STEP" \
+            --out frames \
+            --width "$WIDTH" \
+            --height "$HEIGHT" \
+            --samples "$SAMPLES" \
+            --fps "$FPS"
+
+      - name: Install ffmpeg (if missing)
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+          ffmpeg -version | head -n 1
 
       - name: Encode segment
+        env:
+          FPS: ${{ inputs.fps }}
+          STEP: ${{ inputs.step }}
+          IDX: ${{ matrix.idx }}
         run: |
-          rate=$(python -c "print(${{ inputs.fps }}/${{ inputs.step }})")
+          set -euo pipefail
+          rate=$(python -c "import os; print(int(os.environ['FPS']) / int(os.environ['STEP']))")
+          seg="seg_$(printf '%04d' "$IDX").mp4"
 
           ffmpeg -y \
             -framerate "$rate" \
             -pattern_type glob \
             -i 'frames/*.png' \
-            -vf "fps=${{ inputs.fps }}" \
+            -vf "fps=$FPS,format=yuv420p" \
             -c:v libx264 \
-            -pix_fmt yuv420p \
             -crf 16 \
-            "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
+            "$seg"
 
-          test -s "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
+          test -s "$seg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: seg-${{ matrix.idx }}
           path: seg_*.mp4
           if-no-files-found: error
+          retention-days: 3
 
   stitch:
     needs: [plan, render]
@@ -187,32 +247,58 @@ jobs:
           merge-multiple: true
           path: segments
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg (if missing)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+          ffmpeg -version | head -n 1
 
       - name: Verify and join
+        env:
+          EXPECTED: ${{ needs.plan.outputs.count }}
+          WIDTH: ${{ inputs.width }}
+          HEIGHT: ${{ inputs.height }}
+          TOTAL: ${{ inputs.total_frames }}
+          STEP: ${{ inputs.step }}
         run: |
-          expected=${{ needs.plan.outputs.count }}
+          set -euo pipefail
           found=$(ls segments/seg_*.mp4 | wc -l)
 
-          [ "$found" -eq "$expected" ] || {
-            echo "FATAL: expected $expected segments, found $found"
+          if [ "$found" -ne "$EXPECTED" ]; then
+            echo "FATAL: expected $EXPECTED segments, found $found"
             exit 1
-          }
+          fi
 
-          ls segments/seg_*.mp4 | sort |
-            sed "s|^|file '$PWD/|; s|$|'|" > list.txt
+          ls segments/seg_*.mp4 | sort | sed "s|^|file '$PWD/|; s|$|'|" > list.txt
 
           ffmpeg -y \
             -f concat \
             -safe 0 \
             -i list.txt \
             -c copy \
+            -movflags +faststart \
             final.mp4
 
           test -s final.mp4
+
+          size=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 final.mp4)
+          frames=$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 final.mp4)
+          echo "final.mp4: size=$size frames=$frames"
+
+          if [ "$size" != "${WIDTH}x${HEIGHT}" ]; then
+            echo "FATAL: expected ${WIDTH}x${HEIGHT}, got $size"
+            exit 1
+          fi
+
+          # With step N every rendered frame is held N times, so allow a small rounding margin.
+          margin=$(( STEP * EXPECTED ))
+          diff=$(( frames > TOTAL ? frames - TOTAL : TOTAL - frames ))
+          if [ "$diff" -gt "$margin" ]; then
+            echo "FATAL: expected about $TOTAL frames, got $frames"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -220,14 +306,20 @@ jobs:
           path: final.mp4
           if-no-files-found: error
 
-      - name: Publish as release asset
+      - name: Publish as release asset (optional)
+        if: ${{ inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
+          SCENE: ${{ inputs.scene }}
+          TOTAL: ${{ inputs.total_frames }}
+          WIDTH: ${{ inputs.width }}
+          HEIGHT: ${{ inputs.height }}
+          SAMPLES: ${{ inputs.samples }}
         run: |
           gh release create \
             "video-${{ github.run_number }}" \
             final.mp4 \
             --repo "${{ github.repository }}" \
             --title "Render #${{ github.run_number }}" \
-            --notes "scene=${{ inputs.scene }} frames=${{ inputs.total_frames }} ${{ inputs.width }}x${{ inputs.height }} samples=${{ inputs.samples }}"
+            --notes "scene=$SCENE frames=$TOTAL ${WIDTH}x${HEIGHT} samples=$SAMPLES"
             
