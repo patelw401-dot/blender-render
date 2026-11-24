@@ -7,64 +7,114 @@ def build(bpy, fps):
     sc = bpy.context.scene
     sc.frame_start = 1
     sc.frame_end = fps * 4
+    sc.render.resolution_x = 720
+    sc.render.resolution_y = 1280
 
-    def mat(name, color):
+    def material(name, color):
         m = bpy.data.materials.new(name)
         m.diffuse_color = (*color, 1)
         return m
 
-    skin = mat("Skin", (0.95, 0.62, 0.42))
-    blue = mat("Blue Shirt", (0.05, 0.25, 0.85))
-    black = mat("Black Hair", (0.025, 0.02, 0.04))
-    white = mat("Eyes", (1, 1, 1))
-    ground = mat("Ground", (0.12, 0.55, 0.25))
+    skin = material("Skin", (0.95, 0.62, 0.42))
+    blue = material("Blue Shirt", (0.05, 0.25, 0.85))
+    black = material("Hair", (0.025, 0.02, 0.04))
+    white = material("Eyes", (1, 1, 1))
+    green = material("Ground", (0.12, 0.4, 0.18))
+    shoe = material("Shoes", (0.03, 0.03, 0.04))
 
-    def sphere(name, loc, scale, material):
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=16, location=loc)
-        o = bpy.context.object
-        o.name = name
-        o.scale = scale
-        o.data.materials.append(material)
+    def sphere(name, loc, scale, mat):
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=24, ring_count=16, location=loc
+        )
+        obj = bpy.context.object
+        obj.name = name
+        obj.scale = scale
+        obj.data.materials.append(mat)
         bpy.ops.object.shade_smooth()
-        return o
+        return obj
 
+    def marker(name, loc):
+        obj = bpy.data.objects.new(name, None)
+        sc.collection.objects.link(obj)
+        obj.location = loc
+        return obj
+
+    # Ground
     bpy.ops.mesh.primitive_plane_add(size=200)
-    bpy.context.object.data.materials.append(ground)
+    bpy.context.object.data.materials.append(green)
 
-    body = sphere("Body", (0, 0, 1.25), (0.48, 0.3, 0.65), blue)
-    head = sphere("Head", (0, 0, 2.15), (0.55, 0.48, 0.58), skin)
-    sphere("Hair", (0, 0.08, 2.52), (0.55, 0.48, 0.28), black)
+    # Cartoon body
+    body = sphere("Body", (0, 0, 1.25), (0.48, 0.30, 0.62), blue)
+    sphere("Head", (0, 0, 2.15), (0.52, 0.46, 0.56), skin)
+    sphere("Hair", (0, 0.06, 2.48), (0.54, 0.47, 0.27), black)
 
-    for x in (-0.2, 0.2):
-        sphere("Eye", (x, -0.43, 2.22), (0.09, 0.06, 0.12), white)
+    # Eyes
+    for x in (-0.19, 0.19):
+        sphere("Eye", (x, -0.415, 2.20), (0.075, 0.055, 0.10), white)
+        sphere("Pupil", (x, -0.465, 2.20), (0.035, 0.025, 0.055), black)
 
-    arm = sphere("WavingArm", (0.62, 0, 1.65), (0.16, 0.16, 0.48), skin)
-    arm.rotation_euler[1] = -0.7
+    # Smile
+    sphere("Smile", (0, -0.445, 2.00), (0.13, 0.025, 0.035), black)
 
+    # Arms
+    arm_l = sphere("LeftArm", (-0.58, 0, 1.60), (0.15, 0.15, 0.43), skin)
+    arm_r = sphere("RightArm", (0.58, 0, 1.60), (0.15, 0.15, 0.43), skin)
+    arm_r.rotation_euler[1] = -0.5
+
+    # Legs and shoes
     for x in (-0.22, 0.22):
-        sphere("Leg", (x, 0, 0.48), (0.17, 0.18, 0.48), black)
+        sphere("Leg", (x, 0, 0.48), (0.17, 0.18, 0.43), black)
+        sphere("Shoe", (x, -0.08, 0.10), (0.20, 0.29, 0.10), shoe)
 
+    # QA markers
+    marker("root", (0, 0, 0.1))
+    marker("torso", (0, 0, 1.25))
+    marker("head", (0, 0, 2.15))
+    marker("shoulder.L", (-0.45, 0, 1.75))
+    marker("shoulder.R", (0.45, 0, 1.75))
+    marker("elbow.L", (-0.65, 0, 1.60))
+    elbow = marker("elbow.R", (0.65, 0, 1.60))
+    marker("hip.L", (-0.22, 0, 0.85))
+    marker("hip.R", (0.22, 0, 0.85))
+    marker("knee.L", (-0.22, 0, 0.45))
+    marker("knee.R", (0.22, 0, 0.45))
+    marker("ankle.L", (-0.22, 0, 0.10))
+    marker("ankle.R", (0.22, 0, 0.10))
+
+    # Gentle waving animation
     for f in range(1, sc.frame_end + 1, 3):
-        arm.rotation_euler[1] = -0.7 + 0.6 * math.sin(f * 0.35)
-        arm.keyframe_insert(data_path="rotation_euler", frame=f)
-        body.location.z = 1.25 + 0.06 * abs(math.sin(f * 0.25))
+        arm_r.rotation_euler[1] = -0.5 + 0.35 * math.sin(f * 0.12)
+        arm_r.keyframe_insert(data_path="rotation_euler", frame=f)
+
+        elbow.location.z = 1.60 + 0.08 * math.sin(f * 0.12)
+        elbow.keyframe_insert(data_path="location", frame=f)
+
+        body.location.z = 1.25 + 0.04 * abs(math.sin(f * 0.12))
         body.keyframe_insert(data_path="location", frame=f)
 
+    # Lighting
     bpy.ops.object.light_add(type="AREA", location=(0, -5, 6))
-    bpy.context.object.data.energy = 500
-    bpy.context.object.data.shape = "DISK"
-    bpy.context.object.data.size = 5
+    light = bpy.context.object
+    light.data.energy = 500
+    light.data.shape = "DISK"
+    light.data.size = 5
 
+    # Camera
     cam_data = bpy.data.cameras.new("Camera")
     cam = bpy.data.objects.new("Camera", cam_data)
     sc.collection.objects.link(cam)
-    cam.location = (4, -8, 3.2)
-    cam.rotation_euler = (math.radians(72), 0, math.radians(25))
+    cam.location = (0, -9, 2.2)
+    target = (0, 0, 1.3)
+    direction = bpy.mathutils.Vector(target) - cam.location
+    cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
     cam.data.lens = 50
     sc.camera = cam
 
+    # Background
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs[0].default_value = (0.3, 0.4, 0.65, 1)
+    world.node_tree.nodes["Background"].inputs[0].default_value = (
+        0.3, 0.4, 0.65, 1
+    )
     sc.world = world
-  
+    
