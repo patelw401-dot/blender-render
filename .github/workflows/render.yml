@@ -1,130 +1,223 @@
 name: render
 
 on:
-  workflow_dispatch:
-    inputs:
-      scene:        { description: "Scene script",              default: "scenes/director.py" }
-      shots:        { description: "Shot list JSON (director)",  default: "scenes/shots/demo.json" }
-      total_frames: { description: "Total frames at full fps",  default: "312" }
-      jobs:         { description: "Parallel jobs (max 20)",    default: "20" }
-      step:         { description: "Render every Nth frame",    default: "1" }
-      fps:          { description: "Output fps",                default: "24" }
-      width:        { description: "Width",                     default: "1280" }
-      height:       { description: "Height",                    default: "720" }
-      samples:      { description: "Cycles samples",            default: "24" }
+workflow_dispatch:
+inputs:
+scene:
+description: "Scene script"
+default: "scenes/boy.py"
+shots:
+description: "Shot list (not used by boy scene)"
+default: "scenes/shots/demo.json"
+total_frames:
+description: "Total frames at full fps"
+default: "96"
+jobs:
+description: "Parallel jobs"
+default: "4"
+step:
+description: "Render every Nth frame"
+default: "1"
+fps:
+description: "Output fps"
+default: "24"
+width:
+description: "Width"
+default: "720"
+height:
+description: "Height"
+default: "1280"
+samples:
+description: "Cycles samples"
+default: "24"
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.m.outputs.matrix }}
-      count: ${{ steps.m.outputs.count }}
-    steps:
-      - id: m
-        shell: python3 {0}
-        env:
-          N: ${{ inputs.total_frames }}
-          J: ${{ inputs.jobs }}
-          S: ${{ inputs.step }}
-        run: |
-          import json, math, os
-          n, j, s = int(os.environ["N"]), int(os.environ["J"]), int(os.environ["S"])
-          per = math.ceil(n / j)
-          per = math.ceil(per / s) * s          # chunk size aligned to step
-          inc, start, idx = [], 1, 0
-          while start <= n:
-              end = min(n, start + per - 1)
-              inc.append({"idx": idx, "start": start, "end": end})
-              start, idx = end + 1, idx + 1
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write("matrix=" + json.dumps({"include": inc}) + "\n")
-              f.write(f"count={len(inc)}\n")
+plan:
+runs-on: ubuntu-latest
+outputs:
+matrix: ${{ steps.m.outputs.matrix }}
+count: ${{ steps.m.outputs.count }}
+steps:
+- id: m
+shell: python3 {0}
+env:
+N: ${{ inputs.total_frames }}
+J: ${{ inputs.jobs }}
+S: ${{ inputs.step }}
+run: |
+import json, math, os
 
-  qa:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: License check
-        run: python check_licenses.py
-      - name: Quality gate (hard-fails the whole run)
-        env:
-          SHOTS: ${{ inputs.shots }}
-        run: python qa.py --scene "${{ inputs.scene }}" --fps ${{ inputs.fps }}
+      n = int(os.environ["N"])
+      j = int(os.environ["J"])
+      s = int(os.environ["S"])
 
-  render:
-    needs: [plan, qa]
-    runs-on: ubuntu-latest
-    timeout-minutes: 340
-    strategy:
-      fail-fast: false
-      max-parallel: 20
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Render frames
-        env:
-          SHOTS: ${{ inputs.shots }}
-        run: >
-          python render.py
-          --scene "${{ inputs.scene }}"
-          --start ${{ matrix.start }} --end ${{ matrix.end }}
-          --step ${{ inputs.step }} --out frames
-          --width ${{ inputs.width }} --height ${{ inputs.height }}
-          --samples ${{ inputs.samples }} --fps ${{ inputs.fps }}
-      - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Encode segment
-        run: |
-          rate=$(python -c "print(${{ inputs.fps }}/${{ inputs.step }})")
-          ffmpeg -y -framerate "$rate" -pattern_type glob -i 'frames/*.png' \
-            -vf "fps=${{ inputs.fps }}" -c:v libx264 -pix_fmt yuv420p -crf 16 \
-            "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
-          test -s "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: seg-${{ matrix.idx }}
-          path: seg_*.mp4
-          if-no-files-found: error
+      per = math.ceil(n / j)
+      per = math.ceil(per / s) * s
 
-  stitch:
-    needs: [plan, render]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: seg-*
-          merge-multiple: true
-          path: segments
-      - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Verify and join
-        run: |
-          expected=${{ needs.plan.outputs.count }}
-          found=$(ls segments/seg_*.mp4 | wc -l)
-          [ "$found" -eq "$expected" ] || { echo "FATAL: expected $expected segments, found $found"; exit 1; }
-          ls segments/seg_*.mp4 | sort | sed "s|^|file '$PWD/|; s|$|'|" > list.txt
-          ffmpeg -y -f concat -safe 0 -i list.txt -c copy final.mp4
-          test -s final.mp4
-      - uses: actions/upload-artifact@v4
-        with:
-          name: final-video
-          path: final.mp4
-          if-no-files-found: error
-      - name: Publish as release asset (downloadable without login)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "video-${{ github.run_number }}" final.mp4 --repo "${{ github.repository }}" \
-            --title "Render #${{ github.run_number }} (${{ inputs.shots }})" --notes "scene=${{ inputs.scene }} shots=${{ inputs.shots }} frames=${{ inputs.total_frames }} ${{ inputs.width }}x${{ inputs.height }} samples=${{ inputs.samples }}"
+      inc = []
+      start = 1
+      idx = 0
+
+      while start <= n:
+          end = min(n, start + per - 1)
+          inc.append({
+              "idx": idx,
+              "start": start,
+              "end": end
+          })
+          start = end + 1
+          idx += 1
+
+      with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+          f.write(
+              "matrix=" +
+              json.dumps({"include": inc}) +
+              "\n"
+          )
+          f.write(
+              f"count={len(inc)}\n"
+          )
+
+qa:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v4
+
+  - uses: actions/setup-python@v5
+    with:
+      python-version: "3.13"
+      cache: pip
+
+  - run: pip install -r requirements.txt
+
+  - name: License check
+    run: python check_licenses.py
+
+  - name: Quality gate
+    env:
+      SHOTS: ${{ inputs.shots }}
+    run: |
+      python qa.py \
+        --scene "${{ inputs.scene }}" \
+        --fps ${{ inputs.fps }}
+
+render:
+needs: [plan, qa]
+runs-on: ubuntu-latest
+timeout-minutes: 340
+
+strategy:
+  fail-fast: false
+  max-parallel: 4
+  matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+
+steps:
+  - uses: actions/checkout@v4
+
+  - uses: actions/setup-python@v5
+    with:
+      python-version: "3.13"
+      cache: pip
+
+  - run: pip install -r requirements.txt
+
+  - name: Render frames
+    env:
+      SHOTS: ${{ inputs.shots }}
+    run: >
+      python render.py
+      --scene "${{ inputs.scene }}"
+      --start ${{ matrix.start }}
+      --end ${{ matrix.end }}
+      --step ${{ inputs.step }}
+      --out frames
+      --width ${{ inputs.width }}
+      --height ${{ inputs.height }}
+      --samples ${{ inputs.samples }}
+      --fps ${{ inputs.fps }}
+
+  - name: Install ffmpeg
+    run: |
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq ffmpeg
+
+  - name: Encode segment
+    run: |
+      rate=$(python -c "print(${{ inputs.fps }}/${{ inputs.step }})")
+
+      ffmpeg -y \
+        -framerate "$rate" \
+        -pattern_type glob \
+        -i 'frames/*.png' \
+        -vf "fps=${{ inputs.fps }}" \
+        -c:v libx264 \
+        -pix_fmt yuv420p \
+        -crf 16 \
+        "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
+
+      test -s "seg_$(printf '%04d' ${{ matrix.idx }}).mp4"
+
+  - uses: actions/upload-artifact@v4
+    with:
+      name: seg-${{ matrix.idx }}
+      path: seg_*.mp4
+      if-no-files-found: error
+
+stitch:
+needs: [plan, render]
+runs-on: ubuntu-latest
+permissions:
+contents: write
+
+steps:
+  - uses: actions/download-artifact@v4
+    with:
+      pattern: seg-*
+      merge-multiple: true
+      path: segments
+
+  - name: Install ffmpeg
+    run: |
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq ffmpeg
+
+  - name: Verify and join
+    run: |
+      expected=${{ needs.plan.outputs.count }}
+      found=$(ls segments/seg_*.mp4 | wc -l)
+
+      [ "$found" -eq "$expected" ] || {
+        echo "FATAL: expected $expected segments, found $found"
+        exit 1
+      }
+
+      ls segments/seg_*.mp4 | sort |
+        sed "s|^|file '$PWD/|; s|$|'|" > list.txt
+
+      ffmpeg -y \
+        -f concat \
+        -safe 0 \
+        -i list.txt \
+        -c copy \
+        final.mp4
+
+      test -s final.mp4
+
+  - uses: actions/upload-artifact@v4
+    with:
+      name: final-video
+      path: final.mp4
+      if-no-files-found: error
+
+  - name: Publish as release asset
+    env:
+      GH_TOKEN: ${{ github.token }}
+    run: |
+      gh release create \
+        "video-${{ github.run_number }}" \
+        final.mp4 \
+        --repo "${{ github.repository }}" \
+        --title "Render #${{ github.run_number }}" \
+        --notes "scene=${{ inputs.scene }} frames=${{ inputs.total_frames }} ${{
+          inputs.width
+        }}x${{ inputs.height }} samples=${{ inputs.samples }}"
